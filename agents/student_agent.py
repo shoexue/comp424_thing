@@ -34,7 +34,16 @@ class StudentAgent(Agent):
         # Time and search configuration
         self.time_limit = 1.6      # seconds per move (stay < 2.0s)
         self.max_depth_cap = 6     # absolute upper bound on depth
-        self.max_branch_inner = 8 # how many best moves to explore at inner nodes
+        self.max_branch_inner = 8  # how many best moves to explore at inner nodes
+
+    # ===================== TIME HELPERS =====================
+
+    def _now(self):
+        # Use monotonic clock for reliable timing
+        return time.monotonic()
+
+    def _time_up(self, start_time):
+        return self._now() - start_time >= self.time_limit
 
     # ===================== PUBLIC ENTRYPOINT =====================
 
@@ -48,7 +57,7 @@ class StudentAgent(Agent):
 
         Must return a MoveCoordinates or None.
         """
-        start_time = time.time()
+        start_time = self._now()
 
         legal_moves = get_valid_moves(chess_board, player)
         if not legal_moves:
@@ -61,17 +70,21 @@ class StudentAgent(Agent):
         # choose a greedy move that:
         #   - maximizes our piece count
         #   - minimizes remaining empty squares
-        # This helps actually finish the game instead of bouncing forever.
         # ------------------------------------------------------------------
         opp_moves = get_valid_moves(chess_board, opponent)
         my_count = np.count_nonzero(chess_board == player)
         opp_count = np.count_nonzero(chess_board == opponent)
 
-        if len(opp_moves) == 0 and my_count >= opp_count:
+        if len(opp_moves) == 0 and my_count >= opp_count and not self._time_up(start_time):
+            print("[StudentAgent] SWITCHING TO GREEDY endgame closer")
+
             best_move = None
             best_score = -1e9
 
             for move in legal_moves:
+                if self._time_up(start_time):
+                    break
+
                 board_copy = deepcopy(chess_board)
                 execute_move(board_copy, move, player)
 
@@ -85,8 +98,13 @@ class StudentAgent(Agent):
                     best_score = score
                     best_move = move
 
+            if best_move is None:
+                best_move = random_move(chess_board, player)
+
+            time_taken = self._now() - start_time
             print(
-                f"[StudentAgent] Endgame closer: chosen move with greedy score={best_score:.2f}"
+                f"[StudentAgent] Endgame closer: chosen move with greedy score={best_score:.2f}, "
+                f"time={time_taken:.3f}s"
             )
             return best_move
         # ------------------------------------------------------------------
@@ -97,7 +115,7 @@ class StudentAgent(Agent):
 
         depth = 1
         while depth <= self.max_depth_cap:
-            if time.time() - start_time > self.time_limit:
+            if self._time_up(start_time):
                 break
 
             move, value, finished = self._search_depth(
@@ -114,7 +132,7 @@ class StudentAgent(Agent):
 
             depth += 1
 
-        time_taken = time.time() - start_time
+        time_taken = self._now() - start_time
         print(
             f"[StudentAgent] Player {player} chose move with value={best_value_overall:.2f}, "
             f"final depth={depth-1}, time={time_taken:.3f}s"
@@ -131,6 +149,7 @@ class StudentAgent(Agent):
         """
         legal_moves = get_valid_moves(board, me)
         if not legal_moves:
+            # No moves at root => passing is forced; treat as finished
             return None, None, True
 
         best_move = None
@@ -144,7 +163,7 @@ class StudentAgent(Agent):
         )
 
         for move in ordered_moves:
-            if time.time() - start_time > self.time_limit:
+            if self._time_up(start_time):
                 return best_move, best_value, False  # time cutoff
 
             child_board = self._simulate_move(board, move, me)
@@ -195,8 +214,9 @@ class StudentAgent(Agent):
         `current_turn` is whose move it is at this node.
         """
         # Time check
-        if time.time() - start_time > self.time_limit:
-            return 0, False  # value ignored when finished=False
+        if self._time_up(start_time):
+            # Value is ignored when finished=False; just bubble up cutoff
+            return 0, False
 
         # Terminal or depth 0: evaluate
         is_endgame, _, _ = check_endgame(board)
@@ -235,7 +255,7 @@ class StudentAgent(Agent):
             value = -float("inf")
 
             for move in moves_to_consider:
-                if time.time() - start_time > self.time_limit:
+                if self._time_up(start_time):
                     return value, False
 
                 child_board = self._simulate_move(board, move, current_turn)
@@ -268,7 +288,7 @@ class StudentAgent(Agent):
             value = float("inf")
 
             for move in moves_to_consider:
-                if time.time() - start_time > self.time_limit:
+                if self._time_up(start_time):
                     return value, False
 
                 child_board = self._simulate_move(board, move, current_turn)
@@ -317,15 +337,7 @@ class StudentAgent(Agent):
         scored.sort(key=lambda x: x[0], reverse=maximizing)
         return [m for (_, m) in scored]
 
-
     def _fast_eval(self, board, color, opponent):
-        """
-        Cheap eval for move ordering:
-
-        - Piece difference
-        - Corner difference (big)
-        No mobility here to save time.
-        """
         my_count = np.count_nonzero(board == color)
         opp_count = np.count_nonzero(board == opponent)
         piece_diff = my_count - opp_count
@@ -336,23 +348,22 @@ class StudentAgent(Agent):
         opp_corners = sum(1 for (i, j) in corners if board[i, j] == opponent)
         corner_diff = my_corners - opp_corners
 
-        return 1.0 * piece_diff + 15.0 * corner_diff
-
-
+        return piece_diff + 15.0 * corner_diff
 
     # ===================== FULL EVALUATION (LEAVES) =====================
 
     def _evaluate_board(self, board, color, opponent):
         """
-        Strong heuristic:
+        Stage-aware evaluation for Ataxx:
 
         - Terminal: huge +/- score
-        - Piece difference
-        - Corner difference (very high weight)
-        - Mobility: reward my moves, heavily punish opponent's moves
+        - Piece difference (more important late)
+        - Corner difference (always big, bigger late)
+        - Mobility (important early/mid)
+        - Frontier pieces: punish having many exposed pieces
         """
 
-        # Terminal check
+        # ----- Terminal check -----
         is_endgame, p1_score, p2_score = check_endgame(board)
         if is_endgame:
             if color == 1:
@@ -367,30 +378,64 @@ class StudentAgent(Agent):
             else:
                 return 0
 
-        # Piece difference
+        n = board.shape[0]
+
+        # ----- Game phase: 0 = opening, 1 = endgame -----
+        empty_count = np.count_nonzero(board == 0)
+        total_squares = board.size
+        phase = 1.0 - (empty_count / total_squares)  # early ~0, late ~1
+
+        # ----- Piece difference -----
         my_count = np.count_nonzero(board == color)
         opp_count = np.count_nonzero(board == opponent)
         piece_diff = my_count - opp_count
 
-        # Corner difference
-        n = board.shape[0]
+        # ----- Corner difference -----
         corners = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
         my_corners = sum(1 for (i, j) in corners if board[i, j] == color)
         opp_corners = sum(1 for (i, j) in corners if board[i, j] == opponent)
         corner_diff = my_corners - opp_corners
 
-        # Mobility
+        # ----- Mobility (only really matters earlier) -----
         my_moves = len(get_valid_moves(board, color))
         opp_moves = len(get_valid_moves(board, opponent))
-        mobility_my = my_moves
-        mobility_opp = opp_moves
 
-        # Combine with **much stronger** weights
+        # ----- Frontier pieces (pieces touching empty squares) -----
+        dirs = [(-1, -1), (-1, 0), (-1, 1),
+                (0, -1),           (0, 1),
+                (1, -1),  (1, 0),  (1, 1)]
+
+        frontier_my = 0
+        frontier_opp = 0
+        for i in range(n):
+            for j in range(n):
+                if board[i, j] == color or board[i, j] == opponent:
+                    is_frontier = False
+                    for di, dj in dirs:
+                        ni, nj = i + di, j + dj
+                        if 0 <= ni < n and 0 <= nj < n and board[ni, nj] == 0:
+                            is_frontier = True
+                            break
+                    if is_frontier:
+                        if board[i, j] == color:
+                            frontier_my += 1
+                        else:
+                            frontier_opp += 1
+
+        # ----- Weights: depend on phase -----
+        piece_w      = 0.5 + 1.5 * phase      # 0.5 early, 2.0 late
+        corner_w     = 10.0 + 10.0 * phase    # 10 early, 20 late
+        my_mob_w     = 0.4 * (1.0 - phase)    # only early/mid
+        opp_mob_w    = 1.6 * (1.0 - phase)
+        frontier_w   = 0.5 * (1.0 - phase)    # punish exposed pieces early
+
         value = (
-            1.0 * piece_diff +         # still matters
-            15.0 * corner_diff +       # corners are huge
-            0.5 * mobility_my -        # nice to have options
-            2.0 * mobility_opp         # very bad if opponent has options
+            piece_w    * piece_diff +
+            corner_w   * corner_diff +
+            my_mob_w   * my_moves -
+            opp_mob_w  * opp_moves -
+            frontier_w * frontier_my +
+            frontier_w * frontier_opp
         )
 
         return value

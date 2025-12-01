@@ -20,432 +20,223 @@ class StudentAgent(Agent):
     Ataxx Student Agent for COMP 424
 
     Uses:
-    - Iterative deepening
     - Minimax with alpha-beta pruning
-    - Cheaper heuristic
-    - Branching factor control (only explore top-K moves in search)
-    - Simple endgame closer heuristic
+    - Iterative deepening
+    - Cheaper heuristic function
     """
 
     def __init__(self):
         super(StudentAgent, self).__init__()
-        self.name = "student_agent"
+        self.name = "StudentAgent"
+        self.autoplay = True
+        self.board_size = 7
+        self.time_limit = 1.95
+        self.best_move_found = None
+        self.best_score_found = float('-inf')
+        self.start_time = None
+        self.max_depth = 3
 
-        # Time and search configuration
-        self.time_limit = 1.6      # seconds per move (stay < 2.0s)
-        self.max_depth_cap = 6     # absolute upper bound on depth
-        self.max_branch_inner = 8  # how many best moves to explore at inner nodes
-
-    # ===================== TIME HELPERS =====================
-
-    def _now(self):
-        # Use monotonic clock for reliable timing
-        return time.monotonic()
-
-    def _time_up(self, start_time):
-        return self._now() - start_time >= self.time_limit
-
-    # ===================== PUBLIC ENTRYPOINT =====================
-
-    def step(self, chess_board, player, opponent):
-        """
-        Called by the simulator for each move.
-
-        chess_board: np.ndarray
-        player:      1 or 2 (this agent)
-        opponent:    1 or 2 (other player)
-
-        Must return a MoveCoordinates or None.
-        """
-        start_time = self._now()
-
-        legal_moves = get_valid_moves(chess_board, player)
+    def step(self, board, color, opponent):
+        start_time = time.time()
+        legal_moves = get_valid_moves(board, color)
+        
         if not legal_moves:
-            print(f"[StudentAgent] No valid moves for player {player}")
             return None
-
-        # ------------------------------------------------------------------
-        # ENDGAME CLOSER:
-        # If the opponent has no valid moves and we are ahead or tied,
-        # choose a greedy move that:
-        #   - maximizes our piece count
-        #   - minimizes remaining empty squares
-        # ------------------------------------------------------------------
-        opp_moves = get_valid_moves(chess_board, opponent)
-        my_count = np.count_nonzero(chess_board == player)
-        opp_count = np.count_nonzero(chess_board == opponent)
-
-        if len(opp_moves) == 0 and my_count >= opp_count and not self._time_up(start_time):
-            print("[StudentAgent] SWITCHING TO GREEDY endgame closer")
-
-            best_move = None
-            best_score = -1e9
-
-            for move in legal_moves:
-                if self._time_up(start_time):
-                    break
-
-                board_copy = deepcopy(chess_board)
-                execute_move(board_copy, move, player)
-
-                empties_after = np.count_nonzero(board_copy == 0)
-                my_after = np.count_nonzero(board_copy == player)
-
-                # Prefer more of our pieces and fewer empties
-                score = my_after * 100 - empties_after * 10
-
-                if score > best_score:
-                    best_score = score
-                    best_move = move
-
-            if best_move is None:
-                best_move = random_move(chess_board, player)
-
-            time_taken = self._now() - start_time
-            print(
-                f"[StudentAgent] Endgame closer: chosen move with greedy score={best_score:.2f}, "
-                f"time={time_taken:.3f}s"
-            )
-            return best_move
-        # ------------------------------------------------------------------
-
-        # Fallback in case search is cut off
-        best_move_overall = random_move(chess_board, player)
-        best_value_overall = -float("inf")
-
-        depth = 1
-        while depth <= self.max_depth_cap:
-            if self._time_up(start_time):
-                break
-
-            move, value, finished = self._search_depth(
-                chess_board, player, opponent, depth, start_time
-            )
-
-            if not finished:
-                # Time cutoff at this depth → keep previous best
-                break
-
-            if move is not None and value is not None and value > best_value_overall:
-                best_move_overall = move
-                best_value_overall = value
-
-            depth += 1
-
-        time_taken = self._now() - start_time
-        print(
-            f"[StudentAgent] Player {player} chose move with value={best_value_overall:.2f}, "
-            f"final depth={depth-1}, time={time_taken:.3f}s"
-        )
-
-        return best_move_overall
-
-    # ===================== SEARCH LAYER =====================
-
-    def _search_depth(self, board, me, opp, depth, start_time):
-        """
-        Search best move for 'me' at a fixed depth, treating root as maximizing.
-        Returns (best_move, best_value, finished_full_depth).
-        """
-        legal_moves = get_valid_moves(board, me)
-        if not legal_moves:
-            # No moves at root => passing is forced; treat as finished
-            return None, None, True
-
+        
+        # If few moves or endgame, use deeper search
+        if len(legal_moves) <= 5 or np.count_nonzero(board == 0) < 10:
+            current_max_depth = 4
+        else:
+            current_max_depth = self.max_depth
+        
         best_move = None
-        best_value = -float("inf")
-        alpha = -float("inf")
-        beta = float("inf")
-
-        # Move ordering at root: use fast eval
-        ordered_moves = self._order_moves_fast(
-            board, legal_moves, me, me, opp, maximizing=True
-        )
-
-        for move in ordered_moves:
-            if self._time_up(start_time):
-                return best_move, best_value, False  # time cutoff
-
-            child_board = self._simulate_move(board, move, me)
-
-            value, finished = self._minimax(
-                child_board,
-                depth - 1,
-                alpha,
-                beta,
-                maximizing=False,
-                current_turn=opp,   # opponent moves next
-                me=me,
-                opp=opp,
-                start_time=start_time,
-                inner_node=True,
-            )
-
-            if not finished:
-                return best_move, best_value, False
-
-            if value > best_value:
-                best_value = value
-                best_move = move
-
-            alpha = max(alpha, best_value)
-            if beta <= alpha:
+        best_score = float('-inf')
+        
+        # Iterative deepening with time management
+        for depth in range(1, current_max_depth + 1):
+            if time.time() - start_time > self.time_limit:
                 break
-
-        return best_move, best_value, True
-
-    def _minimax(
-        self,
-        board,
-        depth,
-        alpha,
-        beta,
-        maximizing,
-        current_turn,
-        me,
-        opp,
-        start_time,
-        inner_node,
-    ):
-        """
-        Minimax with alpha-beta pruning.
-        Returns (value, finished_full_depth).
-        `me` is the player this agent is (fixed perspective).
-        `current_turn` is whose move it is at this node.
-        """
+                
+            current_best_move = None
+            current_best_score = float('-inf')
+            
+            for move in legal_moves:
+                if time.time() - start_time > self.time_limit:
+                    break
+                    
+                simulated_board = deepcopy(board)
+                execute_move(simulated_board, move, color)
+                
+                # Use minimax with opponent's perspective for counter-play
+                score = self.minimax(
+                    simulated_board, depth-1, False, color, opponent,
+                    float('-inf'), float('inf'), start_time
+                )
+                
+                if score > current_best_score:
+                    current_best_score = score
+                    current_best_move = move
+            
+            # Only update if we completed this depth level
+            if time.time() - start_time <= self.time_limit and current_best_move is not None:
+                best_move = current_best_move
+                best_score = current_best_score
+        
+        return best_move or legal_moves[0]
+    
+    def minimax(self, board, depth, maximizing, color, opponent, alpha, beta, start_time):
         # Time check
-        if self._time_up(start_time):
-            # Value is ignored when finished=False; just bubble up cutoff
-            return 0, False
-
-        # Terminal or depth 0: evaluate
-        is_endgame, _, _ = check_endgame(board)
-        if is_endgame or depth == 0:
-            v = self._evaluate_board(board, me, opp)
-            return v, True
-
-        legal_moves = get_valid_moves(board, current_turn)
-
+        if time.time() - start_time > self.time_limit:
+            return 0
+        
+        # Terminal conditions
+        if depth == 0:
+            return self.advanced_evaluate(board, color, opponent)
+        
+        current_player = color if maximizing else opponent
+        legal_moves = get_valid_moves(board, current_player)
+        
         if not legal_moves:
-            # Pass turn: other player moves, depth-1
-            next_turn = opp if current_turn == me else me
-            return self._minimax(
-                board,
-                depth - 1,
-                alpha,
-                beta,
-                not maximizing,
-                current_turn=next_turn,
-                me=me,
-                opp=opp,
-                start_time=start_time,
-                inner_node=inner_node,
-            )
-
-        # Decide how many moves to consider at this node
-        ordered_moves = self._order_moves_fast(
-            board, legal_moves, current_turn, me, opp, maximizing
-        )
-        if inner_node and depth >= 2 and len(ordered_moves) > self.max_branch_inner:
-            moves_to_consider = ordered_moves[: self.max_branch_inner]
-        else:
-            moves_to_consider = ordered_moves
-
+            # If no moves, evaluate current state
+            return self.advanced_evaluate(board, color, opponent)
+        
         if maximizing:
-            value = -float("inf")
-
-            for move in moves_to_consider:
-                if self._time_up(start_time):
-                    return value, False
-
-                child_board = self._simulate_move(board, move, current_turn)
-                next_turn = opp if current_turn == me else me
-
-                child_val, finished = self._minimax(
-                    child_board,
-                    depth - 1,
-                    alpha,
-                    beta,
-                    maximizing=False,
-                    current_turn=next_turn,
-                    me=me,
-                    opp=opp,
-                    start_time=start_time,
-                    inner_node=True,
-                )
-
-                if not finished:
-                    return value, False
-
-                value = max(value, child_val)
-                alpha = max(alpha, value)
+            max_eval = float('-inf')
+            for move in legal_moves:
+                if time.time() - start_time > self.time_limit:
+                    break
+                    
+                new_board = deepcopy(board)
+                execute_move(new_board, move, color)
+                eval = self.minimax(new_board, depth-1, False, color, opponent, alpha, beta, start_time)
+                max_eval = max(max_eval, eval)
+                alpha = max(alpha, eval)
                 if beta <= alpha:
                     break
-
-            return value, True
-
+            return max_eval
         else:
-            value = float("inf")
-
-            for move in moves_to_consider:
-                if self._time_up(start_time):
-                    return value, False
-
-                child_board = self._simulate_move(board, move, current_turn)
-                next_turn = opp if current_turn == me else me
-
-                child_val, finished = self._minimax(
-                    child_board,
-                    depth - 1,
-                    alpha,
-                    beta,
-                    maximizing=True,
-                    current_turn=next_turn,
-                    me=me,
-                    opp=opp,
-                    start_time=start_time,
-                    inner_node=True,
-                )
-
-                if not finished:
-                    return value, False
-
-                value = min(value, child_val)
-                beta = min(beta, value)
+            min_eval = float('inf')
+            for move in legal_moves:
+                if time.time() - start_time > self.time_limit:
+                    break
+                    
+                new_board = deepcopy(board)
+                execute_move(new_board, move, opponent)
+                eval = self.minimax(new_board, depth-1, True, color, opponent, alpha, beta, start_time)
+                min_eval = min(min_eval, eval)
+                beta = min(beta, eval)
                 if beta <= alpha:
                     break
-
-            return value, True
-
-    # ===================== MOVE ORDERING (FAST) =====================
-
-    def _order_moves_fast(self, board, moves, current_turn, me, opp, maximizing):
+            return min_eval
+    
+    def advanced_evaluate(self, board, color, opponent):
         """
-        Move ordering using a cheap heuristic evaluated from **my** perspective (`me`),
-        regardless of whose turn it is.
+        Enhanced evaluation function:
 
-        At max nodes (my turn), we sort descending (best for me).
-        At min nodes (opp turn), we sort ascending (best for me last).
+        - Piece difference (important later in game)
+        - Corner/Edge control (important mid/late game)
+        - Mobility (important early [sometimes mid] game)
+        - Stability (important early/mid game)
+        - Capture potential
         """
-        scored = []
-        for m in moves:
-            child = self._simulate_move(board, m, current_turn)
-            # Always evaluate from my perspective (me vs opp)
-            val = self._fast_eval(child, me, opp)
-            scored.append((val, m))
-
-        scored.sort(key=lambda x: x[0], reverse=maximizing)
-        return [m for (_, m) in scored]
-
-    def _fast_eval(self, board, color, opponent):
-        my_count = np.count_nonzero(board == color)
-        opp_count = np.count_nonzero(board == opponent)
-        piece_diff = my_count - opp_count
-
         n = board.shape[0]
-        corners = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
-        my_corners = sum(1 for (i, j) in corners if board[i, j] == color)
-        opp_corners = sum(1 for (i, j) in corners if board[i, j] == opponent)
-        corner_diff = my_corners - opp_corners
-
-        return piece_diff + 15.0 * corner_diff
-
-    # ===================== FULL EVALUATION (LEAVES) =====================
-
-    def _evaluate_board(self, board, color, opponent):
-        """
-        Stage-aware evaluation for Ataxx:
-
-        - Terminal: huge +/- score
-        - Piece difference (more important late)
-        - Corner difference (always big, bigger late)
-        - Mobility (important early/mid)
-        - Frontier pieces: punish having many exposed pieces
-        """
-
-        # ----- Terminal check -----
-        is_endgame, p1_score, p2_score = check_endgame(board)
-        if is_endgame:
-            if color == 1:
-                diff = p1_score - p2_score
-            else:
-                diff = p2_score - p1_score
-
-            if diff > 0:
-                return 10000
-            elif diff < 0:
-                return -10000
-            else:
-                return 0
-
-        n = board.shape[0]
-
-        # ----- Game phase: 0 = opening, 1 = endgame -----
-        empty_count = np.count_nonzero(board == 0)
-        total_squares = board.size
-        phase = 1.0 - (empty_count / total_squares)  # early ~0, late ~1
-
-        # ----- Piece difference -----
-        my_count = np.count_nonzero(board == color)
+        player_count = np.count_nonzero(board == color)
         opp_count = np.count_nonzero(board == opponent)
-        piece_diff = my_count - opp_count
-
-        # ----- Corner difference -----
-        corners = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
-        my_corners = sum(1 for (i, j) in corners if board[i, j] == color)
-        opp_corners = sum(1 for (i, j) in corners if board[i, j] == opponent)
-        corner_diff = my_corners - opp_corners
-
-        # ----- Mobility (only really matters earlier) -----
-        my_moves = len(get_valid_moves(board, color))
+        
+        # 1. Piece difference (with endgame multiplier)
+        empty_cells = np.count_nonzero(board == 0)
+        total_cells = n * n
+        
+        if empty_cells < total_cells * 0.3:  # Endgame - pieces matter more
+            score_diff = (player_count - opp_count) * 2
+        else:
+            score_diff = player_count - opp_count
+        
+        # 2. Strategic positioning (counters greedy agent)
+        corners = [(0, 0), (0, n-1), (n-1, 0), (n-1, n-1)]
+        edges = []
+        for i in range(1, n-1):
+            edges.extend([(0, i), (i, 0), (n-1, i), (i, n-1)])
+        
+        # Corner value - but less than greedy agent
+        corner_score = 0
+        for corner in corners:
+            if board[corner] == color:
+                corner_score += 3  # Less than greedy's +5
+            elif board[corner] == opponent:
+                corner_score -= 4  # Penalize opponent corners more
+        
+        # Edge control - something greedy agent ignores
+        edge_score = 0
+        for edge in edges:
+            if board[edge] == color:
+                edge_score += 1
+            elif board[edge] == opponent:
+                edge_score -= 1
+        
+        # 3. Mobility advantage
+        player_moves = len(get_valid_moves(board, color))
         opp_moves = len(get_valid_moves(board, opponent))
-
-        # ----- Frontier pieces (pieces touching empty squares) -----
-        dirs = [(-1, -1), (-1, 0), (-1, 1),
-                (0, -1),           (0, 1),
-                (1, -1),  (1, 0),  (1, 1)]
-
-        frontier_my = 0
-        frontier_opp = 0
+        
+        if player_moves + opp_moves > 0:
+            mobility_score = 2 * (player_moves - opp_moves) / (player_moves + opp_moves) * 10
+        else:
+            mobility_score = 0
+        
+        # 4. Stability - pieces that are hard to flip
+        stability_score = self.calculate_stability(board, color, opponent, corners, edges)
+        
+        # 5. Potential captures
+        capture_potential = self.evaluate_capture_potential(board, color, opponent)
+        
+        # Combined score with tuned weights
+        total_score = (
+            score_diff * 1.0 +
+            corner_score * 1.0 +
+            edge_score * 0.7 +
+            mobility_score * 1.5 +
+            stability_score * 1.2 +
+            capture_potential * 0.8
+        )
+        
+        return total_score
+    
+    def calculate_stability(self, board, color, opponent, corners, edges):
+        """Calculate how stable pieces are (hard to capture)."""
+        n = board.shape[0]
+        stable_score = 0
+        
+        # Corners are very stable
+        for corner in corners:
+            if board[corner] == color:
+                stable_score += 2
+        
+        # Pieces adjacent to corners are often stable
+        for corner in corners:
+            i, j = corner
+            for dx, dy in [(0,1), (1,0), (0,-1), (-1,0)]:
+                ni, nj = i + dx, j + dy
+                if 0 <= ni < n and 0 <= nj < n:
+                    if board[ni, nj] == color and board[i, j] == color:
+                        stable_score += 1
+        
+        return stable_score
+    
+    def evaluate_capture_potential(self, board, color, opponent):
+        """Evaluate potential for future captures."""
+        n = board.shape[0]
+        capture_score = 0
+        
+        # Look for vulnerable opponent pieces
         for i in range(n):
             for j in range(n):
-                if board[i, j] == color or board[i, j] == opponent:
-                    is_frontier = False
-                    for di, dj in dirs:
-                        ni, nj = i + di, j + dj
-                        if 0 <= ni < n and 0 <= nj < n and board[ni, nj] == 0:
-                            is_frontier = True
-                            break
-                    if is_frontier:
-                        if board[i, j] == color:
-                            frontier_my += 1
-                        else:
-                            frontier_opp += 1
-
-        # ----- Weights: depend on phase -----
-        piece_w      = 0.5 + 1.5 * phase      # 0.5 early, 2.0 late
-        corner_w     = 10.0 + 10.0 * phase    # 10 early, 20 late
-        my_mob_w     = 0.4 * (1.0 - phase)    # only early/mid
-        opp_mob_w    = 1.6 * (1.0 - phase)
-        frontier_w   = 0.5 * (1.0 - phase)    # punish exposed pieces early
-
-        value = (
-            piece_w    * piece_diff +
-            corner_w   * corner_diff +
-            my_mob_w   * my_moves -
-            opp_mob_w  * opp_moves -
-            frontier_w * frontier_my +
-            frontier_w * frontier_opp
-        )
-
-        return value
-
-    # ===================== UTILITIES =====================
-
-    def _simulate_move(self, board, move, player):
-        """
-        Returns a new board with `move` applied for `player`.
-        """
-        new_board = np.copy(board)
-        execute_move(new_board, move, player)
-        return new_board
+                if board[i, j] == opponent:
+                    # Check if this piece can be captured
+                    for dx in [-2, -1, 0, 1, 2]:
+                        for dy in [-2, -1, 0, 1, 2]:
+                            if abs(dx) + abs(dy) in [1, 2]:  # Valid move distances
+                                ni, nj = i + dx, j + dy
+                                if 0 <= ni < n and 0 <= nj < n and board[ni, nj] == color:
+                                    capture_score += 1
+        
+        return capture_score

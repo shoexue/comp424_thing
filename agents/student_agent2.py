@@ -3,7 +3,6 @@ from store import register_agent
 
 import numpy as np
 import time
-from copy import deepcopy
 
 from helpers import (
     random_move,
@@ -22,24 +21,24 @@ class StudentAgent(Agent):
     Uses:
     - Iterative deepening
     - Minimax with alpha-beta pruning
-    - Cheaper heuristic
-    - Branching factor control (only explore top-K moves in search)
-    - Simple endgame closer heuristic
+    - Stage-aware evaluation (material, corners, mobility, frontier)
+    - Fast heuristic for move ordering
+    - Branching factor control (top-K moves at inner nodes)
+    - Simple greedy endgame closer when opponent has no moves
     """
 
     def __init__(self):
         super(StudentAgent, self).__init__()
         self.name = "student_agent"
 
-        # Time and search configuration
-        self.time_limit = 1.6      # seconds per move (stay < 2.0s)
-        self.max_depth_cap = 6     # absolute upper bound on depth
-        self.max_branch_inner = 8  # how many best moves to explore at inner nodes
+        # Time and search configuration (tuned for mimi)
+        self.time_limit = 1.5       # seconds per move (stay < 2.0s on mimi)
+        self.max_depth_cap = 6      # absolute upper bound on depth
+        self.max_branch_inner = 6   # how many best moves to explore at inner nodes
 
     # ===================== TIME HELPERS =====================
 
     def _now(self):
-        # Use monotonic clock for reliable timing
         return time.monotonic()
 
     def _time_up(self, start_time):
@@ -64,20 +63,13 @@ class StudentAgent(Agent):
             print(f"[StudentAgent] No valid moves for player {player}")
             return None
 
-        # ------------------------------------------------------------------
-        # ENDGAME CLOSER:
-        # If the opponent has no valid moves and we are ahead or tied,
-        # choose a greedy move that:
-        #   - maximizes our piece count
-        #   - minimizes remaining empty squares
-        # ------------------------------------------------------------------
+        # ---------- Endgame closer: if opp has no moves and we are not behind ----------
         opp_moves = get_valid_moves(chess_board, opponent)
         my_count = np.count_nonzero(chess_board == player)
         opp_count = np.count_nonzero(chess_board == opponent)
 
         if len(opp_moves) == 0 and my_count >= opp_count and not self._time_up(start_time):
             print("[StudentAgent] SWITCHING TO GREEDY endgame closer")
-
             best_move = None
             best_score = -1e9
 
@@ -85,7 +77,7 @@ class StudentAgent(Agent):
                 if self._time_up(start_time):
                     break
 
-                board_copy = deepcopy(chess_board)
+                board_copy = chess_board.copy()
                 execute_move(board_copy, move, player)
 
                 empties_after = np.count_nonzero(board_copy == 0)
@@ -109,12 +101,24 @@ class StudentAgent(Agent):
             return best_move
         # ------------------------------------------------------------------
 
+        # ---------- Phase-based depth cap (important for speed) ----------
+        empty_count = np.count_nonzero(chess_board == 0)
+        total_squares = chess_board.size
+        phase = 1.0 - (empty_count / total_squares)  # 0 = opening, 1 = endgame
+
+        if phase < 0.30:
+            depth_cap_this_move = min(3, self.max_depth_cap)
+        elif phase < 0.70:
+            depth_cap_this_move = min(4, self.max_depth_cap)
+        else:
+            depth_cap_this_move = self.max_depth_cap  # late game: search deeper
+
         # Fallback in case search is cut off
         best_move_overall = random_move(chess_board, player)
         best_value_overall = -float("inf")
 
         depth = 1
-        while depth <= self.max_depth_cap:
+        while depth <= depth_cap_this_move:
             if self._time_up(start_time):
                 break
 
@@ -215,8 +219,7 @@ class StudentAgent(Agent):
         """
         # Time check
         if self._time_up(start_time):
-            # Value is ignored when finished=False; just bubble up cutoff
-            return 0, False
+            return 0, False  # cutoff, value ignored
 
         # Terminal or depth 0: evaluate
         is_endgame, _, _ = check_endgame(board)
@@ -330,7 +333,6 @@ class StudentAgent(Agent):
         scored = []
         for m in moves:
             child = self._simulate_move(board, m, current_turn)
-            # Always evaluate from my perspective (me vs opp)
             val = self._fast_eval(child, me, opp)
             scored.append((val, m))
 
@@ -338,6 +340,11 @@ class StudentAgent(Agent):
         return [m for (_, m) in scored]
 
     def _fast_eval(self, board, color, opponent):
+        """
+        Cheap eval used only for move ordering:
+        - Material (piece difference)
+        - Corner control (heavily weighted)
+        """
         my_count = np.count_nonzero(board == color)
         opp_count = np.count_nonzero(board == opponent)
         piece_diff = my_count - opp_count
@@ -396,7 +403,7 @@ class StudentAgent(Agent):
         opp_corners = sum(1 for (i, j) in corners if board[i, j] == opponent)
         corner_diff = my_corners - opp_corners
 
-        # ----- Mobility (only really matters earlier) -----
+        # ----- Mobility -----
         my_moves = len(get_valid_moves(board, color))
         opp_moves = len(get_valid_moves(board, opponent))
 
@@ -446,6 +453,6 @@ class StudentAgent(Agent):
         """
         Returns a new board with `move` applied for `player`.
         """
-        new_board = np.copy(board)
+        new_board = board.copy()
         execute_move(new_board, move, player)
         return new_board
